@@ -1,7 +1,6 @@
 name: Docker Image CI for GHCR
 
-on:
-  workflow_dispatch:
+on: workflow_dispatch
 
 jobs:
   build:
@@ -17,8 +16,8 @@ jobs:
           password: ${{ secrets.GH_PAT }}
       
       - name: Build and Push
-              uses: docker/build-push-action@v5
-              with:
-                push: true
-                tags: ghcr.io/${{ github.actor }}/${{ github.repository }}:latest        
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: ghcr.io/${{ github.actor }}/${{ github.repository }}:latest        
     
