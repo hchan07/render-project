@@ -1,7 +1,7 @@
 import express from "express";
 import cors from 'cors';
 
-const allowedOrigins = ['https://hchan07.github.io'];
+const allowedOrigins = ['https://hchan07.github.io','https://my-project.dev', 'https://dev.my-project.dev' ];
 
 // Configure CORS options
 const corsOptions = {
