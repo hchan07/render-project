@@ -1,0 +1,4 @@
+dev.my-project-backend.dev {
+	reverse_proxy localhost:3000
+	tls internal
+}
