@@ -4,12 +4,14 @@ import cors from 'cors';
 import { jwtVerify, importJWK } from 'jose';
 import cookieParser from 'cookie-parser';
 import { createClient } from "@supabase/supabase-js";
+import { Pool } from 'pg';
 
 const allowedOrigins = ['https://hchan07.github.io','https://my-project.dev', 'https://dev.my-project.dev'];
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const RAW_SUPABASE_PUBLIC_KEY = process.env.RAW_SUPABASE_PUBLIC_KEY;
+const SUPABASE_DATABASE_URL = process.env.SUPABASE_DATABASE_URL;
 
 if (!RAW_SUPABASE_PUBLIC_KEY) {
   throw new Error("Missing SUPABASE_PUBLIC_KEY environment variable");
@@ -43,10 +45,37 @@ const cookieOptions = {
   sameSite: 'none',   // Usually 'lax' for Supabase, but check your login code
 };
 
+const pool = new Pool({
+  connectionString: SUPABASE_DATABASE_URL,
+});
+
+
+const verifySupabaseUser = async (req, res, next) => {
+  const token = req.cookies['sb-access-token'];
+
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const EC_PUBLIC_KEY = await importJWK(SUPABASE_PUBLIC_KEY, 'ES256');
+    // 1. Verify using your existing jose logic
+    const { payload } = await jwtVerify(token, EC_PUBLIC_KEY, {
+      algorithms: ['ES256'],
+      audience: 'authenticated',
+    });
+
+    // 2. Attach payload to the request for use in routes
+    req.user = payload; 
+    next();
+  } catch (err) {
+    console.error('JWT Verification Error:', err.message);
+    return res.status(403).json({ error: 'Invalid Token' });
+  }
+};
+
 
 app.post('/api/signup', async (req, res) => {
   // 1. Express handles body parsing via middleware, no need for req.json()  
-  const { email, password, fullName } = req.body;
+  const { email, password } = req.body;
   
   try {
     const response = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
@@ -57,8 +86,7 @@ app.post('/api/signup', async (req, res) => {
       },
       body: JSON.stringify({
         email,
-        password,
-        data: { full_name: fullName }
+        password
       }),
     });
 
@@ -68,6 +96,8 @@ app.post('/api/signup', async (req, res) => {
       // Send error back using Express syntax
       return res.status(response.status || 400).json(data);
     }
+    
+    console.dir(data);
 
     // 2. Extract tokens
     const { access_token, refresh_token } = data;
@@ -117,10 +147,13 @@ app.post('/api/login', async (req, res) => {
     });
 
     const data = await response.json();
-
+    
     if (!response.ok) {
-      return res.status(response.status).json({ error: data.error_description || data.error });
+      
+      return res.status(response.status).json({ ...data });
     }
+    
+    console.log(data);
 
     // 2. Extract tokens from Supabase response
     const { access_token, refresh_token, user } = data;
@@ -144,7 +177,6 @@ app.post('/api/login', async (req, res) => {
       user: {
         id: user.id,
         email: user.email,
-        fullName: user.user_metadata?.full_name
       }
     });
 
@@ -179,7 +211,6 @@ try {
       user: {
         id: payload.sub,
         email: payload.email,
-        fullName: payload.user_metadata?.full_name,
         role: payload.role
       }
     });
@@ -220,6 +251,86 @@ app.post('/api/logout', async (req, res) => {
   });
 });
 
+
+app.get('/api/todos', verifySupabaseUser, async (req, res) => {
+  let client;
+
+  try {
+    // 1. Connection attempt is INSIDE the try block
+    client = await pool.connect();
+
+    await client.query('BEGIN');
+
+    
+    // Set the identity
+    await client.query(
+      `SELECT set_config('request.jwt.claims', $1, true)`,
+      [JSON.stringify(req.user)]
+    );
+
+    const result = await client.query('SELECT * FROM todos');
+    await client.query('COMMIT');
+    res.json(result.rows);
+
+  } catch (err) {
+    // 4. If a transaction started, we must roll it back
+    if (client) {
+      await client.query('ROLLBACK');
+    }
+    console.log(err)
+    console.error('Database Error:', err.message);
+    res.status(500).json({ error: 'Database error' });
+
+  } finally {
+    // 5. CRITICAL: Always release the client back to the pool
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+app.post('/api/todos', verifySupabaseUser, async (req, res) => {
+  const { task } = req.body;
+
+  const userId = req.user.sub; // From your auth middleware
+console.log(req.user)
+  // 1. Get a single client from the pool for the transaction
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // 2. Set the "Identity" for this specific database session
+    // This makes auth.uid() in your RLS policy return the correct UUID
+    await client.query(
+      `SELECT set_config('request.jwt.claims', $1, true)`,
+      [JSON.stringify(req.user)]
+    );
+
+    
+
+    // 3. Perform the Insert
+    const queryText = 'INSERT INTO todos (task, user_id) VALUES ($1, $2) RETURNING *';
+    const result = await client.query(queryText, [task, userId]);
+
+    await client.query('COMMIT');
+    
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    
+    // Check if the error was an RLS violation
+    if (err.code === '42501') {
+      return res.status(403).json({ error: "Security Policy Violation: You cannot create todos for others." });
+    }
+
+    console.error('Database Error:', err);
+    res.status(500).json({ error: "Internal Server Error" });
+  } finally {
+    // 4. Always release the client back to the pool!
+    client.release();
+  }
+});
 
 app.get("/api", (req, res) => {
 	res.json({'fruits': ['apple', 'orange', 'banana', "cherry"]
