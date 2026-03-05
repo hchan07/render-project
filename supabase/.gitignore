@@ -8,3 +8,5 @@
 .env.*.local
 
 signing_keys.json
+
+snippets
